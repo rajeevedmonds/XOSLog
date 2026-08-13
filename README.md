@@ -23,6 +23,7 @@ enforced at compile time).
 - **Syslog support** (RFC 3164) over the standard `/dev/log` Unix datagram
   socket, with facility selection, automatic reconnection and correct
   per-record severities.
+- **Remote logging** to another Linux server via RFC 3164 syslog over UDP.
 - **Pure-Rust timestamps** (RFC 3339, microsecond precision, configurable UTC
   offset) — no libc, no `chrono`.
 - **Macros**: `log_trace!`, `log_debug!`, `log_info!`, `log_warn!`,
@@ -135,6 +136,40 @@ construct a [`SyslogSink`] directly:
 use xoslog::{Facility, LoggerBuilder, SyslogSink};
 
 let sink = SyslogSink::new(["/run/my-syslog.sock"], Facility::Local0, "myapp");
+let logger = LoggerBuilder::new().sink(sink).build().unwrap();
+```
+
+## Remote logging
+
+Send records to a remote Linux server as RFC 3164 syslog over UDP (the
+classic remote syslog transport, port 514 by convention):
+
+```rust,no_run
+use xoslog::{Facility, Level, LoggerBuilder};
+
+let logger = LoggerBuilder::new()
+    .level(Level::Info)
+    .to_remote_syslog("192.0.2.10", 514, Facility::Daemon)
+    .unwrap()
+    .build()
+    .unwrap();
+
+logger.info("reaching across the network");
+logger.flush();
+```
+
+Each record becomes a single UDP datagram (`<PRI>TIMESTAMP HOSTNAME TAG[PID]:
+MSG`). UDP is connectionless and fire-and-forget, so the logger never blocks
+and keeps running even if the remote host is unreachable — records may be
+lost in transit, exactly as with classic UDP syslog. For a pre-resolved
+address or a custom identity, construct a [`RemoteSyslogSink`] directly:
+
+```rust,no_run
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use xoslog::{Facility, LoggerBuilder, RemoteSyslogSink};
+
+let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 514);
+let sink = RemoteSyslogSink::new(addr, Facility::Daemon, "myapp").unwrap();
 let logger = LoggerBuilder::new().sink(sink).build().unwrap();
 ```
 

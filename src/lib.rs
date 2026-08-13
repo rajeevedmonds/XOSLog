@@ -73,6 +73,24 @@
 //! logger.warn("low memory");
 //! logger.flush();
 //! ```
+//!
+//! # Remote logging
+//!
+//! Send records to a remote Linux server as RFC 3164 syslog over UDP:
+//!
+//! ```no_run
+//! use xoslog::{Facility, Level, LoggerBuilder};
+//!
+//! let logger = LoggerBuilder::new()
+//!     .level(Level::Info)
+//!     .to_remote_syslog("192.0.2.10", 514, Facility::Daemon)
+//!     .unwrap()
+//!     .build()
+//!     .unwrap();
+//!
+//! logger.info("reaching across the network");
+//! logger.flush();
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -91,5 +109,5 @@ pub use logger::{
     DEFAULT_CHANNEL_CAPACITY, DEFAULT_MAX_FILE_SIZE,
 };
 pub use sink::{FileSink, Sink};
-pub use syslog::{Facility, SyslogSink, DEFAULT_SYSLOG_SOCKETS};
+pub use syslog::{Facility, RemoteSyslogSink, SyslogSink, DEFAULT_SYSLOG_SOCKETS};
 pub use time::Timestamp;

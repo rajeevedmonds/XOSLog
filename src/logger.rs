@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use crate::entry::LogEntry;
 use crate::level::Level;
 use crate::sink::{FileSink, Sink, StderrSink, StdoutSink};
-use crate::syslog::{default_ident, Facility, SyslogSink};
+use crate::syslog::{default_ident, Facility, RemoteSyslogSink, SyslogSink};
 use crate::time::Timestamp;
 
 /// Default capacity of the internal bounded queue.
@@ -43,6 +43,8 @@ enum SinkSource {
     File(PathBuf, u64, usize),
     /// The local syslog daemon.
     Syslog(SyslogSink),
+    /// A remote syslog server over UDP.
+    RemoteSyslog(RemoteSyslogSink),
     /// A caller-provided sink.
     Custom(Box<dyn Sink>),
 }
@@ -331,6 +333,34 @@ impl LoggerBuilder {
         self
     }
 
+    /// Write to a remote syslog server over UDP.
+    ///
+    /// `host` is resolved to the first address returned by
+    /// `(host, port).to_socket_addrs()` (typically port 514 for syslog). The
+    /// program identity (syslog tag) is derived from `argv[0]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`] if `host` cannot be resolved or the UDP
+    /// socket cannot be created.
+    pub fn to_remote_syslog(
+        mut self,
+        host: &str,
+        port: u16,
+        facility: Facility,
+    ) -> std::io::Result<LoggerBuilder> {
+        use std::net::ToSocketAddrs;
+        let addr = (host, port).to_socket_addrs()?.next().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "hostname resolved to no addresses",
+            )
+        })?;
+        self.sink =
+            SinkSource::RemoteSyslog(RemoteSyslogSink::new(addr, facility, default_ident())?);
+        Ok(self)
+    }
+
     /// Build the logger: open the sink and spawn the writer thread.
     ///
     /// # Errors
@@ -345,6 +375,7 @@ impl LoggerBuilder {
                 Box::new(FileSink::open(path, max_size, max_backups)?)
             }
             SinkSource::Syslog(sink) => Box::new(sink),
+            SinkSource::RemoteSyslog(sink) => Box::new(sink),
             SinkSource::Custom(sink) => sink,
         };
 

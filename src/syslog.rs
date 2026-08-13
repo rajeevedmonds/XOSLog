@@ -1,10 +1,17 @@
 //! Syslog (RFC 3164) support.
 //!
-//! [`SyslogSink`] delivers records to a syslog daemon over a Unix domain
-//! datagram socket — the standard `/dev/log` interface on Linux. It is
-//! implemented in pure Rust with no dependencies and no `unsafe` code.
+//! Two sinks deliver records to syslog daemons using the RFC 3164 protocol:
+//!
+//! - [`SyslogSink`] targets a local daemon over a Unix domain datagram socket
+//!   — the standard `/dev/log` interface on Linux.
+//! - [`RemoteSyslogSink`] targets a remote host over UDP (the classic remote
+//!   syslog transport, port 514 by convention).
+//!
+//! Everything is implemented in pure Rust with no dependencies and no
+//! `unsafe` code.
 
 use std::io;
+use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 
@@ -185,30 +192,101 @@ impl SyslogSink {
 
     /// Build an RFC 3164 datagram from a formatted record.
     fn build_packet(&self, level: Level, timestamp: Timestamp, formatted: &[u8]) -> Vec<u8> {
-        let pri = self.facility.code() * 8 + level_to_severity(level);
-        let header = format!(
-            "<{pri}>{} {} {}[{}]: ",
-            rfc3164_timestamp(timestamp),
-            self.hostname,
-            self.ident,
-            self.pid
-        );
-        // Strip the trailing newline added by the record formatter.
-        let mut msg = formatted;
-        if msg.last() == Some(&b'\n') {
-            msg = &msg[..msg.len() - 1];
-        }
-        let budget = MAX_SYSLOG_PACKET.saturating_sub(header.len());
-        let msg = &msg[..msg.len().min(budget)];
-
-        let mut out = String::with_capacity(header.len() + msg.len());
-        out.push_str(&header);
-        out.push_str(&String::from_utf8_lossy(msg));
-        out.into_bytes()
+        build_packet(
+            self.facility,
+            level,
+            timestamp,
+            &self.hostname,
+            &self.ident,
+            self.pid,
+            formatted,
+        )
     }
 }
 
 impl Sink for SyslogSink {
+    fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
+        // Raw byte writes carry no level; assume Info severity.
+        self.deliver(Level::Info, Timestamp::now(0), bytes)
+    }
+
+    fn write_entry(&mut self, entry: &LogEntry, formatted: &[u8]) -> io::Result<()> {
+        self.deliver(entry.level, entry.timestamp, formatted)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A sink that delivers log records to a remote syslog server over UDP.
+///
+/// This is the classic remote syslog transport (RFC 3164), typically sent to
+/// port 514 of the remote host. Each record is sent as a single UDP datagram:
+///
+/// ```text
+/// <PRI>TIMESTAMP HOSTNAME TAG[PID]: MSG
+/// ```
+///
+/// Because UDP is connectionless and fire-and-forget, records can be lost in
+/// transit or when the remote server is down — the sink never blocks, and the
+/// writer keeps running. On Linux, an unreachable peer is sometimes reported
+/// via an ICMP error on the next `send`; such errors surface through
+/// [`Sink::write_entry`] and are handled by the writer's usual failure policy.
+///
+/// The writer thread uses [`Sink::write_entry`], so each record's level is
+/// encoded accurately in the priority. Using [`Sink::write_bytes`] directly
+/// assumes the `Info` severity.
+pub struct RemoteSyslogSink {
+    socket: UdpSocket,
+    facility: Facility,
+    ident: String,
+    hostname: String,
+    pid: u32,
+}
+
+impl RemoteSyslogSink {
+    /// Create a sink that sends syslog datagrams to `addr`.
+    ///
+    /// The local socket is bound to an ephemeral dual-stack port, so both
+    /// IPv4 and IPv6 targets are supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the local UDP socket cannot be created or
+    /// connected.
+    pub fn new(
+        addr: SocketAddr,
+        facility: Facility,
+        ident: impl Into<String>,
+    ) -> io::Result<RemoteSyslogSink> {
+        let socket = UdpSocket::bind("[::]:0")?;
+        socket.connect(addr)?;
+        Ok(RemoteSyslogSink {
+            socket,
+            facility,
+            ident: sanitize_ident(ident.into()),
+            hostname: read_hostname(),
+            pid: std::process::id(),
+        })
+    }
+
+    /// Deliver a formatted record as a syslog datagram.
+    fn deliver(&self, level: Level, timestamp: Timestamp, formatted: &[u8]) -> io::Result<()> {
+        let packet = build_packet(
+            self.facility,
+            level,
+            timestamp,
+            &self.hostname,
+            &self.ident,
+            self.pid,
+            formatted,
+        );
+        self.socket.send(&packet).map(|_| ())
+    }
+}
+
+impl Sink for RemoteSyslogSink {
     fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
         // Raw byte writes carry no level; assume Info severity.
         self.deliver(Level::Info, Timestamp::now(0), bytes)
@@ -251,6 +329,50 @@ fn rfc3164_timestamp(ts: Timestamp) -> String {
         "{month} {:2} {:02}:{:02}:{:02}",
         ts.day, ts.hour, ts.minute, ts.second
     )
+}
+
+/// Build the RFC 3164 header: `<PRI>TIMESTAMP HOSTNAME TAG[PID]: `.
+fn packet_header(
+    facility: Facility,
+    level: Level,
+    timestamp: Timestamp,
+    hostname: &str,
+    ident: &str,
+    pid: u32,
+) -> String {
+    let pri = facility.code() * 8 + level_to_severity(level);
+    format!(
+        "<{pri}>{} {} {}[{pid}]: ",
+        rfc3164_timestamp(timestamp),
+        hostname,
+        ident,
+    )
+}
+
+/// Build an RFC 3164 datagram from a formatted record, shared by both the
+/// local and remote sinks.
+fn build_packet(
+    facility: Facility,
+    level: Level,
+    timestamp: Timestamp,
+    hostname: &str,
+    ident: &str,
+    pid: u32,
+    formatted: &[u8],
+) -> Vec<u8> {
+    let header = packet_header(facility, level, timestamp, hostname, ident, pid);
+    // Strip the trailing newline added by the record formatter.
+    let mut msg = formatted;
+    if msg.last() == Some(&b'\n') {
+        msg = &msg[..msg.len() - 1];
+    }
+    let budget = MAX_SYSLOG_PACKET.saturating_sub(header.len());
+    let msg = &msg[..msg.len().min(budget)];
+
+    let mut out = String::with_capacity(header.len() + msg.len());
+    out.push_str(&header);
+    out.push_str(&String::from_utf8_lossy(msg));
+    out.into_bytes()
 }
 
 /// Restrict a program identity to characters that are safe in an RFC 3164
@@ -371,5 +493,31 @@ mod tests {
         let big = vec![b'x'; 5000];
         let packet = sink.build_packet(Level::Error, ts, &big);
         assert!(packet.len() <= MAX_SYSLOG_PACKET);
+    }
+
+    #[test]
+    fn shared_packet_builder_format() {
+        let ts = Timestamp::now(0);
+        let formatted = b"remote hello\n";
+        let built = build_packet(
+            Facility::Daemon,
+            Level::Info,
+            ts,
+            "myhost",
+            "app",
+            1234,
+            formatted,
+        );
+        let s = String::from_utf8(built).unwrap();
+        // Daemon(3) * 8 + Info(6) = 30.
+        assert!(s.starts_with("<30>"), "got: {s}");
+        assert!(s.contains("myhost app[1234]: "), "got: {s}");
+        assert!(s.ends_with("remote hello"));
+    }
+
+    #[test]
+    fn remote_sink_packet_header() {
+        let sink = RemoteSyslogSink::new("127.0.0.1:9".parse().unwrap(), Facility::User, "rtest");
+        let _ = sink; // constructing must succeed even with no listener
     }
 }
