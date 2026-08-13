@@ -9,9 +9,9 @@
 //! Logging is asynchronous: callers push formatted records onto a bounded,
 //! thread-safe queue and a dedicated writer thread drains the queue, formats
 //! records and writes them to the configured sink (standard output, standard
-//! error, or a size-rotating file). This keeps logging calls cheap and
-//! lock-free for callers while a single serialized writer guarantees that
-//! records from any number of threads are never interleaved.
+//! error, a size-rotating file, or the syslog daemon). This keeps logging
+//! calls cheap and lock-free for callers while a single serialized writer
+//! guarantees that records from any number of threads are never interleaved.
 //!
 //! The library is *robust*:
 //!
@@ -58,6 +58,21 @@
 //! logger.info("hello from xoslog");
 //! logger.flush();
 //! ```
+//!
+//! # Syslog
+//!
+//! ```no_run
+//! use xoslog::{Facility, Level, LoggerBuilder};
+//!
+//! let logger = LoggerBuilder::new()
+//!     .level(Level::Info)
+//!     .to_syslog(Facility::Daemon)
+//!     .build()
+//!     .unwrap();
+//!
+//! logger.warn("low memory");
+//! logger.flush();
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -66,6 +81,7 @@ mod entry;
 mod level;
 mod logger;
 mod sink;
+mod syslog;
 mod time;
 
 pub use entry::LogEntry;
@@ -75,4 +91,5 @@ pub use logger::{
     DEFAULT_CHANNEL_CAPACITY, DEFAULT_MAX_FILE_SIZE,
 };
 pub use sink::{FileSink, Sink};
+pub use syslog::{Facility, SyslogSink, DEFAULT_SYSLOG_SOCKETS};
 pub use time::Timestamp;

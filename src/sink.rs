@@ -4,6 +4,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::entry::LogEntry;
+
 /// A destination for formatted log records.
 ///
 /// Implementations must be [`Send`] because they are moved into the writer
@@ -11,6 +13,14 @@ use std::path::{Path, PathBuf};
 pub trait Sink: Send {
     /// Write raw bytes to the destination.
     fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()>;
+
+    /// Write a full log entry. The default implementation forwards the
+    /// pre-formatted record to [`write_bytes`]. Sinks that need structured
+    /// per-record data (e.g. the syslog severity) override this method.
+    fn write_entry(&mut self, _entry: &LogEntry, formatted: &[u8]) -> io::Result<()> {
+        self.write_bytes(formatted)
+    }
+
     /// Flush any buffered data to the underlying destination.
     fn flush(&mut self) -> io::Result<()>;
 }

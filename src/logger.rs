@@ -11,6 +11,7 @@ use std::thread::JoinHandle;
 use crate::entry::LogEntry;
 use crate::level::Level;
 use crate::sink::{FileSink, Sink, StderrSink, StdoutSink};
+use crate::syslog::{default_ident, Facility, SyslogSink};
 use crate::time::Timestamp;
 
 /// Default capacity of the internal bounded queue.
@@ -40,6 +41,8 @@ enum SinkSource {
     Stderr,
     /// A size-rotating file at `path`, with `max_size` and `max_backups`.
     File(PathBuf, u64, usize),
+    /// The local syslog daemon.
+    Syslog(SyslogSink),
     /// A caller-provided sink.
     Custom(Box<dyn Sink>),
 }
@@ -315,6 +318,19 @@ impl LoggerBuilder {
         self
     }
 
+    /// Write to the local syslog daemon over the standard Unix datagram
+    /// sockets ([`crate::DEFAULT_SYSLOG_SOCKETS`]).
+    ///
+    /// The program identity (syslog tag) is derived from `argv[0]`. The
+    /// connection is established lazily, so building the logger succeeds even
+    /// if the daemon is temporarily unavailable; the writer reconnects
+    /// automatically on every message.
+    #[must_use]
+    pub fn to_syslog(mut self, facility: Facility) -> LoggerBuilder {
+        self.sink = SinkSource::Syslog(SyslogSink::local(facility, default_ident()));
+        self
+    }
+
     /// Build the logger: open the sink and spawn the writer thread.
     ///
     /// # Errors
@@ -328,6 +344,7 @@ impl LoggerBuilder {
             SinkSource::File(path, max_size, max_backups) => {
                 Box::new(FileSink::open(path, max_size, max_backups)?)
             }
+            SinkSource::Syslog(sink) => Box::new(sink),
             SinkSource::Custom(sink) => sink,
         };
 
@@ -373,7 +390,7 @@ fn writer_loop(rx: Receiver<Message>, mut sink: Box<dyn Sink>, include_location:
                     let _ = err.flush();
                     return false;
                 }
-                if sink.write_bytes(&buf).is_ok() {
+                if sink.write_entry(&entry, &buf).is_ok() {
                     consecutive_errors = 0;
                 } else {
                     consecutive_errors += 1;

@@ -20,6 +20,9 @@ enforced at compile time).
     resort rather than silently dropping records.
   - `flush()` and `shutdown()` give deterministic draining and teardown.
 - **Size-based file rotation** with a bounded number of backups.
+- **Syslog support** (RFC 3164) over the standard `/dev/log` Unix datagram
+  socket, with facility selection, automatic reconnection and correct
+  per-record severities.
 - **Pure-Rust timestamps** (RFC 3339, microsecond precision, configurable UTC
   offset) — no libc, no `chrono`.
 - **Macros**: `log_trace!`, `log_debug!`, `log_info!`, `log_warn!`,
@@ -99,6 +102,41 @@ logger.flush(); // guarantees every record reached the sink
   until the writer catches up. Nothing is ever lost.
 - `Backpressure::DropNewest`: if the queue is full the newest record is
   dropped and counted; `Logger::dropped_message_count()` reports the total.
+
+## Syslog
+
+```rust,no_run
+use xoslog::{Facility, Level, LoggerBuilder};
+
+let logger = LoggerBuilder::new()
+    .level(Level::Info)
+    .to_syslog(Facility::Daemon) // ident derived from argv[0]
+    .build()
+    .unwrap();
+
+logger.warn("low memory");
+logger.flush();
+```
+
+Records are sent over the standard Linux syslog datagram socket (`/dev/log`,
+`/var/run/syslog`, `/var/run/log`) as RFC 3164 packets:
+
+```text
+<PRI>TIMESTAMP HOSTNAME TAG[PID]: MSG
+```
+
+`PRI = facility * 8 + severity`, with `Level` mapped to the RFC 3164
+severities (`Trace`/`Debug` -> `debug`, `Info` -> `info`, `Warn` ->
+`warning`, `Error` -> `err`). The connection is lazy and re-established
+automatically if the daemon restarts. For a custom socket path or identity,
+construct a [`SyslogSink`] directly:
+
+```rust,no_run
+use xoslog::{Facility, LoggerBuilder, SyslogSink};
+
+let sink = SyslogSink::new(["/run/my-syslog.sock"], Facility::Local0, "myapp");
+let logger = LoggerBuilder::new().sink(sink).build().unwrap();
+```
 
 ## Record format
 
