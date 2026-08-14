@@ -24,6 +24,9 @@ enforced at compile time).
   socket, with facility selection, automatic reconnection and correct
   per-record severities.
 - **Remote logging** to another Linux server via RFC 3164 syslog over UDP.
+- **Structured logging**: flat JSON output (`.json()`) plus a typed
+  `Field`/`FieldValue` API and a `fields!` macro for Loki/ELK/Datadog without a
+  parser.
 - **Pure-Rust timestamps** (RFC 3339, microsecond precision, configurable UTC
   offset) — no libc, no `chrono`.
 - **Macros**: `log_trace!`, `log_debug!`, `log_info!`, `log_warn!`,
@@ -182,6 +185,64 @@ let logger = LoggerBuilder::new().sink(sink).build().unwrap();
 Timestamps are UTC by default; use `time_offset_seconds` to shift them, e.g.
 `19800` for UTC+05:30. Location tags can be disabled with
 `include_location(false)`.
+
+## Structured logging (JSON)
+
+Emit each record as a single flat JSON object per line, ready for Loki, ELK
+and Datadog without a server-side parser. Enable it with `.json()` and attach
+typed fields to any record:
+
+```rust,no_run
+use xoslog::{Level, LoggerBuilder, LogEntry};
+
+let logger = LoggerBuilder::new()
+    .json()
+    .to_file("/var/log/app.log", 10 * 1024 * 1024, 3)
+    .unwrap()
+    .build()
+    .unwrap();
+
+logger.log(
+    LogEntry::new(Level::Info, "user login".to_string(), module_path!(), file!(), line!())
+        .field("user", "alice")
+        .field("attempts", 3),
+);
+logger.flush();
+```
+
+Output:
+
+```json
+{"ts":"2026-08-14T04:00:00.000000Z","level":"INFO","msg":"user login","file":"src/main.rs","line":42,"target":"my_app","user":"alice","attempts":3}
+```
+
+The typed field API supports strings, integers, floats, booleans and explicit
+`null`:
+
+```rust,no_run
+# use xoslog::{Field, FieldValue, LogEntry, Level};
+let entry = LogEntry::new(Level::Warn, "metrics".to_string(), "", "", 0)
+    .with_fields(vec![
+        Field::int("count", -7),
+        Field::float("ratio", 0.25),
+        Field::bool("healthy", false),
+        Field::new("missing", FieldValue::Null),
+    ]);
+```
+
+The `fields!` helper and the global macros can be combined:
+
+```rust,no_run
+# use xoslog::{fields, log_info, init_default};
+# fn main() { let _ = init_default();
+log_info!([fields!(user = "bob", score = 9)], "scored");
+# }
+```
+
+`u64` values beyond `i64::MAX` serialize as strings to avoid truncation.
+Records stay on one line: quotes, backslashes, tabs, newlines and other
+control characters are JSON-escaped. Field data is only emitted by `.json()`;
+plain-text sinks ignore it.
 
 ## Platform
 

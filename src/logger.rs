@@ -68,6 +68,7 @@ struct Inner {
     handle: Mutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
     dropped: AtomicUsize,
+    json: bool,
 }
 
 /// A handle to a running logger.
@@ -125,7 +126,7 @@ impl Logger {
         };
 
         if let Err(mpsc::SendError(Message::Log(entry))) = send_result {
-            let _ = emergency_write(&entry);
+            let _ = emergency_write(&entry, self.inner.json);
         }
     }
 
@@ -219,6 +220,7 @@ pub struct LoggerBuilder {
     backpressure: Backpressure,
     include_location: bool,
     time_offset_seconds: i32,
+    json: bool,
     sink: SinkSource,
 }
 
@@ -230,6 +232,7 @@ impl Default for LoggerBuilder {
             backpressure: Backpressure::Block,
             include_location: true,
             time_offset_seconds: 0,
+            json: false,
             sink: SinkSource::Stdout,
         }
     }
@@ -268,6 +271,19 @@ impl LoggerBuilder {
     #[must_use]
     pub fn include_location(mut self, include: bool) -> LoggerBuilder {
         self.include_location = include;
+        self
+    }
+
+    /// Emit each record as a single flat JSON object per line instead of the
+    /// plain-text format.
+    ///
+    /// The line looks like
+    /// `{"ts":"...","level":"INFO","msg":"...","file":"...","line":N,"target":"...",<fields>}`,
+    /// which aggregators such as Loki, ELK and Datadog ingest without a
+    /// parser. Disabled by default.
+    #[must_use]
+    pub fn json(mut self) -> LoggerBuilder {
+        self.json = true;
         self
     }
 
@@ -381,9 +397,10 @@ impl LoggerBuilder {
 
         let (tx, rx) = mpsc::sync_channel(self.capacity);
         let include_location = self.include_location;
+        let json = self.json;
         let handle = std::thread::Builder::new()
             .name("xoslog-writer".to_string())
-            .spawn(move || writer_loop(rx, sink, include_location))?;
+            .spawn(move || writer_loop(rx, sink, include_location, json))?;
 
         let inner = Arc::new(Inner {
             tx: Mutex::new(tx),
@@ -393,6 +410,7 @@ impl LoggerBuilder {
             handle: Mutex::new(Some(handle)),
             closed: AtomicBool::new(false),
             dropped: AtomicUsize::new(0),
+            json,
         });
 
         Ok(Logger { inner })
@@ -400,7 +418,7 @@ impl LoggerBuilder {
 }
 
 /// The writer thread: drains the queue, formats and writes records.
-fn writer_loop(rx: Receiver<Message>, mut sink: Box<dyn Sink>, include_location: bool) {
+fn writer_loop(rx: Receiver<Message>, mut sink: Box<dyn Sink>, include_location: bool, json: bool) {
     let mut consecutive_errors = 0usize;
     let mut degraded = false;
     let mut running = true;
@@ -414,7 +432,11 @@ fn writer_loop(rx: Receiver<Message>, mut sink: Box<dyn Sink>, include_location:
         let stop = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match msg {
             Message::Log(entry) => {
                 let mut buf = Vec::with_capacity(96 + entry.message.len());
-                format_record(&entry, include_location, &mut buf);
+                if json {
+                    crate::json::write_record(&entry, include_location, &mut buf);
+                } else {
+                    format_record(&entry, include_location, &mut buf);
+                }
                 if degraded {
                     let mut err = std::io::stderr().lock();
                     let _ = err.write_all(&buf);
@@ -480,9 +502,13 @@ fn format_record(entry: &LogEntry, include_location: bool, out: &mut Vec<u8>) {
 }
 
 /// Synchronously write a record to standard error.
-fn emergency_write(entry: &LogEntry) -> std::io::Result<()> {
+fn emergency_write(entry: &LogEntry, json: bool) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(96 + entry.message.len());
-    format_record(entry, false, &mut buf);
+    if json {
+        crate::json::write_record(entry, false, &mut buf);
+    } else {
+        format_record(entry, false, &mut buf);
+    }
     let mut err = std::io::stderr().lock();
     err.write_all(b"[xoslog] writer thread unavailable, logging synchronously\n")?;
     err.write_all(&buf)?;
@@ -518,13 +544,50 @@ pub fn init_default() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Build a `Vec<Field>` for use with the structured-logging macro variants.
+///
+/// # Example
+///
+/// ```no_run
+/// # use xoslog::{fields, log_info, init_default};
+/// # fn main() { let _ = init_default();
+/// log_info!([fields!(user = "alice", attempts = 3, ok = true)], "login attempt");
+/// # }
+/// ```
+#[macro_export]
+macro_rules! fields {
+    ($($key:ident = $value:expr),* $(,)?) => {{
+        vec![
+            $($crate::Field::new(stringify!($key), $value),)*
+        ]
+    }};
+}
+
 /// Log at an explicit level via the global logger.
 ///
 /// The level expression must be a [`Level`] value, e.g.
 /// `xoslog::log!(xoslog::Level::Info, "hi {}", 1)`. If no global logger has
 /// been installed the macro is a no-op.
+///
+/// A bracketed list of [`Field`]s may be passed before the message to attach
+/// structured data, e.g. `log!(Level::Info, [fields!(user = "alice")], "hi")`.
 #[macro_export]
 macro_rules! log {
+    ($level:expr, [$fields:expr], $($arg:tt)*) => {{
+        if let Some(__xoslog) = $crate::global() {
+            if __xoslog.is_enabled($level) {
+                let mut __entry = $crate::LogEntry::new(
+                    $level,
+                    format!($($arg)*),
+                    module_path!(),
+                    file!(),
+                    line!(),
+                );
+                __entry.fields = $fields;
+                __xoslog.log(__entry);
+            }
+        }
+    }};
     ($level:expr, $($arg:tt)*) => {{
         if let Some(__xoslog) = $crate::global() {
             if __xoslog.is_enabled($level) {

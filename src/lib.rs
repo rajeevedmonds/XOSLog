@@ -74,6 +74,43 @@
 //! logger.flush();
 //! ```
 //!
+//! # Structured logging
+//!
+//! Turn on `.json()` to emit each record as a single flat JSON object per
+//! line, ready for Loki, ELK and Datadog without a server-side parser.
+//! Attach typed fields to any record:
+//!
+//! ```no_run
+//! use xoslog::{Level, LoggerBuilder, LogEntry};
+//!
+//! let logger = LoggerBuilder::new()
+//!     .json()
+//!     .to_file("/var/log/app.log", 10 * 1024 * 1024, 3)
+//!     .unwrap()
+//!     .build()
+//!     .unwrap();
+//!
+//! logger.log(
+//!     LogEntry::new(Level::Info, "user login".to_string(), module_path!(), file!(), line!())
+//!         .field("user", "alice")
+//!         .field("attempts", 3),
+//! );
+//! logger.flush();
+//! ```
+//!
+//! Records look like
+//! `{"ts":"...","level":"INFO","msg":"user login","file":"...","line":N,"target":"...","user":"alice","attempts":3}`.
+//! The `fields!` helper works with the global macros:
+//!
+//! ```no_run
+//! use xoslog::{fields, log_info, init_default};
+//!
+//! # fn main() {
+//! let _ = init_default();
+//! log_info!([fields!(user = "bob", score = 9)], "scored");
+//! # }
+//! ```
+//!
 //! # Remote logging
 //!
 //! Send records to a remote Linux server as RFC 3164 syslog over UDP:
@@ -96,13 +133,15 @@
 #![warn(missing_docs)]
 
 mod entry;
+mod json;
 mod level;
 mod logger;
 mod sink;
 mod syslog;
 mod time;
 
-pub use entry::LogEntry;
+pub use entry::{Field, FieldValue, LogEntry};
+pub use json::write_record;
 pub use level::Level;
 pub use logger::{
     global, init_default, set_global, Backpressure, Logger, LoggerBuilder,
