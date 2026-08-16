@@ -244,6 +244,156 @@ Records stay on one line: quotes, backslashes, tabs, newlines and other
 control characters are JSON-escaped. Field data is only emitted by `.json()`;
 plain-text sinks ignore it.
 
+## Building and installing on Linux
+
+`xoslog` is a plain Cargo crate with **zero dependencies** and no build-time
+system libraries, so building it requires nothing but the Rust toolchain.
+
+### Prerequisites
+
+Install the Rust toolchain (stable). On Debian/Ubuntu:
+
+```bash
+# Install curl and a C linker/compiler toolchain
+sudo apt install -y curl build-essential
+
+# Install Rust via rustup (unattended)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+# Load cargo/rustc into the current shell
+source "$HOME/.cargo/env"
+```
+
+On Fedora/RHEL:
+
+```bash
+sudo dnf install -y curl gcc
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source "$HOME/.cargo/env"
+```
+
+Alternatively, use your distro's packaged toolchain (`sudo apt install cargo`
+or `sudo dnf install cargo`) — any recent stable Rust works; the crate targets
+edition 2021.
+
+### Build and test
+
+```bash
+# Debug build (artifact: target/debug/libxoslog.rlib)
+cargo build
+
+# Optimized release build (artifact: target/release/libxoslog.rlib)
+cargo build --release
+
+# Run the full test suite, including integration and doc tests
+cargo test --release
+
+# Build the API documentation (target/doc/xoslog/index.html)
+cargo doc --no-deps
+```
+
+The release profile in `Cargo.toml` enables `opt-level = 3`, LTO and
+`codegen-units = 1`, so the resulting `.rlib` is small and fast.
+
+### Make the library available system-wide
+
+Rust builds each dependency from source, so a compiled `.rlib` alone is not
+how Rust projects normally consume a library. There are two supported ways to
+make `xoslog` available system-wide on a Linux machine.
+
+#### 1. Publish to crates.io (recommended for multi-project use)
+
+Publishing makes the crate fetchable by any project on the machine using plain
+Cargo. This requires a [crates.io](https://crates.io) account.
+
+```bash
+cargo login        # paste your crates.io API token
+cargo publish      # uploads xoslog 0.1.0
+```
+
+Any other project can then add it as a dependency:
+
+```toml
+[dependencies]
+xoslog = "0.1"
+```
+
+or, inside a project directory:
+
+```bash
+cargo add xoslog
+```
+
+#### 2. Install the compiled artifacts locally (offline, single machine)
+
+If you cannot publish, copy the build artifacts, crate sources and docs into
+system-wide locations and consume the crate from the filesystem.
+
+```bash
+# Install the built library into a system-wide location
+sudo install -d /usr/local/lib/rust/xoslog
+sudo install -m 644 target/release/libxoslog.rlib target/release/libxoslog.d \
+  /usr/local/lib/rust/xoslog/
+
+# Install the crate sources (needed for path-based dependencies)
+sudo mkdir -p /usr/local/src/xoslog
+sudo cp -r Cargo.toml src /usr/local/src/xoslog/
+
+# Install the API documentation
+sudo install -d /usr/local/share/doc/xoslog
+sudo cp -r target/doc/xoslog/* /usr/local/share/doc/xoslog/
+```
+
+Any project on the machine can then depend on the installed copy:
+
+```toml
+[dependencies]
+xoslog = { path = "/usr/local/src/xoslog" }
+```
+
+and a standalone program can link against the installed `.rlib` directly:
+
+```bash
+rustc --edition 2021 --extern xoslog=target/release/libxoslog.rlib my_program.rs
+```
+
+### Smoke test
+
+Verify that a project on this machine can use the library. Create a scratch
+project, add `xoslog` as a dependency, and run it:
+
+```bash
+cargo new --bin smoke
+cd smoke
+cargo add xoslog
+```
+
+Replace `src/main.rs` with:
+
+```rust
+use xoslog::{init_default, log_info};
+
+fn main() {
+    init_default().unwrap(); // stdout sink, Info threshold
+    log_info!("xoslog is ready for system-wide use");
+    if let Some(logger) = xoslog::global() {
+        logger.flush();
+    }
+}
+```
+
+Then run it:
+
+```bash
+cargo run
+```
+
+You should see a single line like:
+
+```text
+2026-08-13T04:49:00.123456Z [INFO] xoslog is ready for system-wide use (src/main.rs:4 @ smoke)
+```
+
 ## Platform
 
 Targets Linux (any platform with `std` will compile and work, but Linux is
