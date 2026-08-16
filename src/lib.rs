@@ -111,6 +111,23 @@
 //! # }
 //! ```
 //!
+//! # Contextual logging (spans)
+//!
+//! Attach request/user/trace IDs to a scope so every record emitted inside it
+//! automatically carries them as fields:
+//!
+//! ```no_run
+//! # use xoslog::{init_default, log_info, push_context};
+//! # fn main() { let _ = init_default();
+//! let _guard = push_context([xoslog::Field::str("request_id", "abc-123")]);
+//! log_info!("handling request"); // JSON output includes "request_id"
+//! # }
+//! ```
+//!
+//! Scopes nest (innermost wins) and the guard pops the scope on drop. Context
+//! is thread-local; use [`capture_context`] and [`ContextSnapshot::enter`] to
+//! transfer it to spawned threads.
+//!
 //! # Remote logging
 //!
 //! Send records to a remote Linux server as RFC 3164 syslog over UDP:
@@ -132,6 +149,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod context;
 mod entry;
 mod json;
 mod level;
@@ -140,6 +158,7 @@ mod sink;
 mod syslog;
 mod time;
 
+pub use context::{capture_context, current_context, push_context, ContextGuard, ContextSnapshot};
 pub use entry::{Field, FieldValue, LogEntry};
 pub use json::write_record;
 pub use level::Level;

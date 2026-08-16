@@ -27,6 +27,9 @@ enforced at compile time).
 - **Structured logging**: flat JSON output (`.json()`) plus a typed
   `Field`/`FieldValue` API and a `fields!` macro for Loki/ELK/Datadog without a
   parser.
+- **Contextual logging (spans)**: a thread-local scope API (`push_context`,
+  `capture_context`) that attaches request/user/trace IDs to every record
+  emitted inside a scope, with nesting and thread-transfer support.
 - **Pure-Rust timestamps** (RFC 3339, microsecond precision, configurable UTC
   offset) — no libc, no `chrono`.
 - **Macros**: `log_trace!`, `log_debug!`, `log_info!`, `log_warn!`,
@@ -243,6 +246,64 @@ log_info!([fields!(user = "bob", score = 9)], "scored");
 Records stay on one line: quotes, backslashes, tabs, newlines and other
 control characters are JSON-escaped. Field data is only emitted by `.json()`;
 plain-text sinks ignore it.
+
+## Contextual logging (spans)
+
+Attach a request ID, user ID or trace ID to a scope so every log line emitted
+inside it automatically carries that context — no `tracing` dependency and no
+need to thread a context object through every function.
+
+`push_context` pushes a scope onto a thread-local stack and returns a guard
+that pops it when dropped:
+
+```rust,no_run
+use xoslog::{init_default, log_info, push_context, Field};
+
+fn main() {
+    init_default().unwrap();
+
+    let _guard = push_context([
+        Field::str("request_id", "abc-123"),
+        Field::str("user_id", "u42"),
+    ]);
+    log_info!("handling request"); // carries request_id and user_id
+}
+```
+
+With a JSON sink the output includes the context keys:
+
+```json
+{"ts":"2026-08-14T04:00:00.000000Z","level":"INFO","msg":"handling request","file":"src/main.rs","line":12,"target":"my_app","request_id":"abc-123","user_id":"u42"}
+```
+
+Rules:
+
+- **Nesting**: scopes nest; an inner scope merges over its parent and wins for
+  duplicate keys. Popping the inner guard restores the outer value.
+- **Precedence**: fields set explicitly on a record (via `LogEntry::field` or
+  `fields!`) always win over context with the same key.
+- **Format**: context merges into the record's structured fields, so only JSON
+  sinks emit it; plain-text sinks ignore it, like any other field.
+- **Capture at `log()` time**: context is snapshotted when the record is
+  enqueued, so later scope changes never rewrite already-written lines.
+
+Context is thread-local and does not propagate to spawned threads or async
+tasks automatically. Transfer it with a snapshot:
+
+```rust,no_run
+# use xoslog::{push_context, capture_context, Field};
+# fn main() {
+let _guard = push_context([Field::str("request_id", "abc-123")]);
+let snapshot = capture_context();
+
+std::thread::spawn(move || {
+    let _guard = snapshot.enter(); // worker logs now carry the same context
+    // ...
+});
+# }
+```
+
+For a read-only view of the current merged context, call `current_context()`.
 
 ## Building and installing on Linux
 

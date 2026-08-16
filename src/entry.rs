@@ -237,6 +237,25 @@ impl LogEntry {
         self
     }
 
+    /// Merge thread-local context fields into the record.
+    ///
+    /// Fields already present on the record (explicitly, via [`field`] or
+    /// [`with_fields`]) win over context fields with the same key; remaining
+    /// context fields are appended after them. Records without context are
+    /// returned unchanged.
+    ///
+    /// [`field`]: LogEntry::field
+    /// [`with_fields`]: LogEntry::with_fields
+    #[must_use]
+    pub fn merge_context(mut self, context: Vec<Field>) -> LogEntry {
+        for field in context {
+            if !self.fields.iter().any(|existing| existing.key == field.key) {
+                self.fields.push(field);
+            }
+        }
+        self
+    }
+
     /// Human-readable source location, e.g. `src/main.rs:42 @ my_app`.
     ///
     /// Returns an empty string when no source location is attached.

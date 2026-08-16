@@ -98,8 +98,10 @@ impl Logger {
     ///
     /// The record's timestamp is replaced with the current wall-clock time
     /// (using this logger's configured offset). Records below the logger's
-    /// threshold are discarded. If the writer thread has died, the record is
-    /// written synchronously to standard error as a last resort.
+    /// threshold are discarded. The calling thread's current context (see
+    /// [`crate::push_context`]) is merged into the record's fields. If the
+    /// writer thread has died, the record is written synchronously to standard
+    /// error as a last resort.
     pub fn log(&self, mut entry: LogEntry) {
         if self.inner.closed.load(Ordering::Acquire) {
             return;
@@ -108,6 +110,7 @@ impl Logger {
             return;
         }
         entry.timestamp = Timestamp::now(self.inner.time_offset_seconds);
+        entry = entry.merge_context(crate::context::current_context());
 
         let tx = self.tx_guard();
         let msg = Message::Log(entry);
