@@ -145,12 +145,23 @@
 //! logger.info("reaching across the network");
 //! logger.flush();
 //! ```
+//!
+//! # Per-module filtering (`RUST_LOG` style)
+//!
+//! Verbosity can be tuned per module at runtime via the
+//! [`XOSLOG`](DEFAULT_FILTER_ENV) environment variable, using the same
+//! `RUST_LOG` grammar — `XOSLOG=myapp=debug,hyper=warn`. The filter is applied
+//! to the global macros (which use `module_path!()` as the target) and to
+//! [`Logger::log`] (using the entry's target), and is checked programmatically
+//! with [`Logger::is_enabled_for`]. See [`TargetFilter`] for the directive
+//! grammar and [`LoggerBuilder`] for the builder methods.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 mod context;
 mod entry;
+mod filter;
 mod json;
 mod level;
 mod logger;
@@ -160,6 +171,7 @@ mod time;
 
 pub use context::{capture_context, current_context, push_context, ContextGuard, ContextSnapshot};
 pub use entry::{Field, FieldValue, LogEntry};
+pub use filter::{TargetFilter, DEFAULT_FILTER_ENV};
 pub use json::write_record;
 pub use level::Level;
 pub use logger::{

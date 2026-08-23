@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use crate::entry::LogEntry;
+use crate::filter::TargetFilter;
 use crate::level::Level;
 use crate::sink::{FileSink, Sink, StderrSink, StdoutSink};
 use crate::syslog::{default_ident, Facility, RemoteSyslogSink, SyslogSink};
@@ -63,6 +64,7 @@ enum Message {
 struct Inner {
     tx: Mutex<SyncSender<Message>>,
     level: Level,
+    filter: Arc<TargetFilter>,
     time_offset_seconds: i32,
     backpressure: Backpressure,
     handle: Mutex<Option<JoinHandle<()>>>,
@@ -82,31 +84,57 @@ pub struct Logger {
 }
 
 impl Logger {
-    /// Whether records at `level` will be recorded by this logger.
+    /// Whether records at `level` will be recorded for the default target.
+    ///
+    /// "Default target" means a target matched by no per-target directive, so
+    /// this reflects the global default directive or the logger's base level.
+    /// For a target-aware check use [`Logger::is_enabled_for`].
     #[must_use]
     pub fn is_enabled(&self, level: Level) -> bool {
-        level != Level::Off && self.inner.level != Level::Off && level >= self.inner.level
+        self.inner.filter.enabled("", level, self.inner.level)
+    }
+
+    /// Whether records at `level` from module `target` will be recorded.
+    ///
+    /// `target` is the module path (e.g. `my_app::server`) attached to the
+    /// record. Per-target directives from the [`TargetFilter`] apply here, with
+    /// unmatched targets falling back to the logger's base level.
+    #[must_use]
+    pub fn is_enabled_for(&self, level: Level, target: &str) -> bool {
+        self.inner.filter.enabled(target, level, self.inner.level)
     }
 
     /// The threshold level of this logger.
+    ///
+    /// This is the base level configured on the builder; per-target directives
+    /// may raise or lower the effective level for individual modules.
     #[must_use]
     pub fn level(&self) -> Level {
         self.inner.level
+    }
+
+    /// The per-target filter applied to this logger.
+    ///
+    /// Returns an empty filter when no directive is active, in which case the
+    /// base level applies to every target.
+    #[must_use]
+    pub fn filter(&self) -> &TargetFilter {
+        &self.inner.filter
     }
 
     /// Enqueue a log record.
     ///
     /// The record's timestamp is replaced with the current wall-clock time
     /// (using this logger's configured offset). Records below the logger's
-    /// threshold are discarded. The calling thread's current context (see
-    /// [`crate::push_context`]) is merged into the record's fields. If the
-    /// writer thread has died, the record is written synchronously to standard
-    /// error as a last resort.
+    /// effective threshold for the record's target are discarded. The calling
+    /// thread's current context (see [`crate::push_context`]) is merged into
+    /// the record's fields. If the writer thread has died, the record is
+    /// written synchronously to standard error as a last resort.
     pub fn log(&self, mut entry: LogEntry) {
         if self.inner.closed.load(Ordering::Acquire) {
             return;
         }
-        if !self.is_enabled(entry.level) {
+        if !self.is_enabled_for(entry.level, entry.target) {
             return;
         }
         entry.timestamp = Timestamp::now(self.inner.time_offset_seconds);
@@ -224,6 +252,8 @@ pub struct LoggerBuilder {
     include_location: bool,
     time_offset_seconds: i32,
     json: bool,
+    filter: Option<TargetFilter>,
+    read_env: bool,
     sink: SinkSource,
 }
 
@@ -236,6 +266,8 @@ impl Default for LoggerBuilder {
             include_location: true,
             time_offset_seconds: 0,
             json: false,
+            filter: None,
+            read_env: true,
             sink: SinkSource::Stdout,
         }
     }
@@ -287,6 +319,40 @@ impl LoggerBuilder {
     #[must_use]
     pub fn json(mut self) -> LoggerBuilder {
         self.json = true;
+        self
+    }
+
+    /// Apply a per-target filter to the logger.
+    ///
+    /// When set, the [`XOSLOG`](crate::DEFAULT_FILTER_ENV) environment variable
+    /// is ignored. See [`TargetFilter`] for the directive grammar.
+    #[must_use]
+    pub fn filter(mut self, filter: TargetFilter) -> LoggerBuilder {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Read the per-target filter from the
+    /// [`XOSLOG`](crate::DEFAULT_FILTER_ENV) environment variable at build
+    /// time.
+    ///
+    /// This is the default behaviour; the method exists so a filter can be
+    /// re-enabled after [`LoggerBuilder::ignore_env_filter`].
+    #[must_use]
+    pub fn env_filter(mut self) -> LoggerBuilder {
+        self.read_env = true;
+        self
+    }
+
+    /// Do not read the [`XOSLOG`](crate::DEFAULT_FILTER_ENV) environment
+    /// variable at build time.
+    ///
+    /// Useful when `XOSLOG` may be set in the calling environment but must not
+    /// influence this logger. Any filter supplied via
+    /// [`LoggerBuilder::filter`] is still applied.
+    #[must_use]
+    pub fn ignore_env_filter(mut self) -> LoggerBuilder {
+        self.read_env = false;
         self
     }
 
@@ -405,9 +471,16 @@ impl LoggerBuilder {
             .name("xoslog-writer".to_string())
             .spawn(move || writer_loop(rx, sink, include_location, json))?;
 
+        let filter = Arc::new(match self.filter {
+            Some(filter) => filter,
+            None if self.read_env => TargetFilter::from_env().unwrap_or_default(),
+            None => TargetFilter::default(),
+        });
+
         let inner = Arc::new(Inner {
             tx: Mutex::new(tx),
             level: self.level,
+            filter,
             time_offset_seconds: self.time_offset_seconds,
             backpressure: self.backpressure,
             handle: Mutex::new(Some(handle)),
@@ -538,6 +611,9 @@ pub fn set_global(logger: Logger) -> Result<(), Logger> {
 /// Build a default logger (stdout sink, `Info` threshold) and install it as
 /// the global logger. If a global logger already exists it is left untouched.
 ///
+/// The [`XOSLOG`](crate::DEFAULT_FILTER_ENV) environment variable, if set, is
+/// honoured for per-target level tuning (see [`TargetFilter`]).
+///
 /// # Errors
 ///
 /// Returns an [`std::io::Error`] if the logger cannot be built.
@@ -578,7 +654,7 @@ macro_rules! fields {
 macro_rules! log {
     ($level:expr, [$fields:expr], $($arg:tt)*) => {{
         if let Some(__xoslog) = $crate::global() {
-            if __xoslog.is_enabled($level) {
+            if __xoslog.is_enabled_for($level, module_path!()) {
                 let mut __entry = $crate::LogEntry::new(
                     $level,
                     format!($($arg)*),
@@ -593,7 +669,7 @@ macro_rules! log {
     }};
     ($level:expr, $($arg:tt)*) => {{
         if let Some(__xoslog) = $crate::global() {
-            if __xoslog.is_enabled($level) {
+            if __xoslog.is_enabled_for($level, module_path!()) {
                 __xoslog.log($crate::LogEntry::new(
                     $level,
                     format!($($arg)*),

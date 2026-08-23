@@ -34,6 +34,9 @@ enforced at compile time).
   offset) — no libc, no `chrono`.
 - **Macros**: `log_trace!`, `log_debug!`, `log_info!`, `log_warn!`,
   `log_error!` via a process-wide global logger.
+- **Per-module filtering**: a `RUST_LOG`-style
+  `XOSLOG=myapp=debug,hyper=warn` environment variable tunes verbosity per
+  module at runtime, no code changes and no extra dependencies needed.
 
 ## Quick start
 
@@ -109,6 +112,62 @@ logger.flush(); // guarantees every record reached the sink
   until the writer catches up. Nothing is ever lost.
 - `Backpressure::DropNewest`: if the queue is full the newest record is
   dropped and counted; `Logger::dropped_message_count()` reports the total.
+
+## Per-module filtering (`RUST_LOG` style)
+
+Instead of a single global level, you can tune verbosity per module at runtime
+through the `XOSLOG` environment variable. The grammar is the one made popular
+by `RUST_LOG`:
+
+```bash
+# Everything at debug
+XOSLOG=debug ./myapp
+
+# myapp and its submodules at debug, hyper quietened to warn
+XOSLOG=myapp=debug,hyper=warn ./myapp
+
+# Silence one noisy module entirely
+XOSLOG=upstream=off ./myapp
+```
+
+Directive rules:
+
+- `level` (bare, e.g. `debug` or `off`) sets the default level for every
+  target not covered by a specific directive. Unset/empty `XOSLOG` leaves the
+  builder's base level unchanged.
+- `target=level` applies to that target and every descendant module
+  (`myapp` also covers `myapp::server`), but not to lookalikes such as
+  `myapp_client`.
+- `hyper` (bare target) enables that target at the most verbose level; an
+  empty level (`hyper=`) does the same.
+- When several directives match, the longest (most specific) match wins.
+- Levels are case-insensitive and `warning` is accepted for `warn`.
+  Malformed directives are skipped silently.
+
+The filter is read once when the logger is built. It applies to the global
+macros (each `log_*!` uses `module_path!()` as its target), to
+`Logger::log(LogEntry)` (using the entry's `target`), and to the
+`is_enabled_for` check:
+
+```rust,no_run
+use xoslog::{Level, LoggerBuilder, TargetFilter};
+
+let logger = LoggerBuilder::new()
+    .level(Level::Info)
+    .filter(TargetFilter::parse("myapp=debug,hyper=warn"))
+    .build()
+    .unwrap();
+
+if logger.is_enabled_for(Level::Debug, "myapp::server") {
+    // per-target check before doing expensive work
+}
+```
+
+`TargetFilter::parse` builds a filter programmatically; `LoggerBuilder::filter`
+installs it and bypasses the environment. Use
+`LoggerBuilder::ignore_env_filter()` when `XOSLOG` may be set in the calling
+environment but must not affect a particular logger. The environment variable
+name is available as `xoslog::DEFAULT_FILTER_ENV`.
 
 ## Syslog
 
