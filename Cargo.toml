@@ -1,0 +1,18 @@
+[package]
+name = "xoslog"
+version = "0.1.0"
+edition = "2021"
+authors = ["Rajeev Edmonds <contact@rajeevedmonds.com>"]
+description = "A thread-safe, robust logging library for Linux, written in pure Rust with zero dependencies and no unsafe code."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/rajeevedmonds/xoslog"
+keywords = ["logging", "log", "thread-safe", "robust", "linux"]
+categories = ["development-tools::debugging", "command-line-utilities"]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
