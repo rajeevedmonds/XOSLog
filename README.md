@@ -37,6 +37,9 @@ enforced at compile time).
 - **Per-module filtering**: a `RUST_LOG`-style
   `XOSLOG=myapp=debug,hyper=warn` environment variable tunes verbosity per
   module at runtime, no code changes and no extra dependencies needed.
+- **Multiple sinks**: fan records out to several destinations at once (stdout,
+  file, syslog, or a custom sink), each with its own minimum level, with
+  independent failure handling.
 
 ## Quick start
 
@@ -112,6 +115,37 @@ logger.flush(); // guarantees every record reached the sink
   until the writer catches up. Nothing is ever lost.
 - `Backpressure::DropNewest`: if the queue is full the newest record is
   dropped and counted; `Logger::dropped_message_count()` reports the total.
+
+## Multiple sinks
+
+By default a logger writes to one destination. The `to_stdout`/`to_stderr`/
+`to_file`/`to_syslog`/`to_remote_syslog`/`sink` methods set that single sink,
+replacing any previous one. Call `add_sink` to fan records out to additional
+destinations, each with its own minimum level:
+
+```rust,no_run
+use xoslog::{FileSink, Level, LoggerBuilder};
+
+let file = FileSink::open("/var/log/app.log", 10 * 1024 * 1024, 3).unwrap();
+let logger = LoggerBuilder::new()
+    .to_stdout()                 // everything on the console
+    .add_sink(file, Level::Warn) // warnings and errors only, to disk
+    .build()
+    .unwrap();
+
+logger.info("console only");
+logger.error("console and file");
+logger.flush();
+```
+
+`min_level` is an absolute floor applied on top of the logger's level and
+per-module filter: `Level::Trace` means no extra filtering and `Level::Off`
+disables the sink. The record is formatted once and dispatched to every sink
+that accepts it.
+
+Sinks are independent. If one sink fails repeatedly the writer diverts only
+that sink's records to standard error (the same fallback used for a single
+sink) and keeps feeding the rest. `flush()` and `shutdown()` drain every sink.
 
 ## Per-module filtering (`RUST_LOG` style)
 

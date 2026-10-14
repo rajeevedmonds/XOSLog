@@ -254,7 +254,7 @@ pub struct LoggerBuilder {
     json: bool,
     filter: Option<TargetFilter>,
     read_env: bool,
-    sink: SinkSource,
+    sinks: Vec<(SinkSource, Level)>,
 }
 
 impl Default for LoggerBuilder {
@@ -268,7 +268,7 @@ impl Default for LoggerBuilder {
             json: false,
             filter: None,
             read_env: true,
-            sink: SinkSource::Stdout,
+            sinks: Vec::new(),
         }
     }
 }
@@ -367,14 +367,14 @@ impl LoggerBuilder {
     /// Write to standard output.
     #[must_use]
     pub fn to_stdout(mut self) -> LoggerBuilder {
-        self.sink = SinkSource::Stdout;
+        self.set_single_sink(SinkSource::Stdout);
         self
     }
 
     /// Write to standard error.
     #[must_use]
     pub fn to_stderr(mut self) -> LoggerBuilder {
-        self.sink = SinkSource::Stderr;
+        self.set_single_sink(SinkSource::Stderr);
         self
     }
 
@@ -394,15 +394,60 @@ impl LoggerBuilder {
         max_backups: usize,
     ) -> std::io::Result<LoggerBuilder> {
         FileSink::open(&path, max_size, max_backups)?;
-        self.sink = SinkSource::File(path.as_ref().to_path_buf(), max_size, max_backups);
+        self.set_single_sink(SinkSource::File(
+            path.as_ref().to_path_buf(),
+            max_size,
+            max_backups,
+        ));
         Ok(self)
     }
 
     /// Use a caller-provided sink.
     #[must_use]
     pub fn sink(mut self, sink: impl Sink + 'static) -> LoggerBuilder {
-        self.sink = SinkSource::Custom(Box::new(sink));
+        self.set_single_sink(SinkSource::Custom(Box::new(sink)));
         self
+    }
+
+    /// Add an additional sink, fanning records out to it alongside every other
+    /// sink configured on this builder.
+    ///
+    /// `min_level` is an absolute floor applied on top of the logger's own
+    /// level and [`TargetFilter`]: the sink receives a record only when the
+    /// record's level is at least `min_level`. Pass [`Level::Trace`] for no
+    /// extra filtering, or [`Level::Off`] to disable the sink.
+    ///
+    /// Unlike [`LoggerBuilder::to_stdout`] and its siblings, which *replace* the
+    /// configured sink, this method appends. A builder with no sink at all (the
+    /// default) writes to standard output.
+    ///
+    /// Each sink is independent: if one fails repeatedly the writer diverts
+    /// only that sink's records to standard error, leaving the others intact.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use xoslog::{FileSink, Level, LoggerBuilder};
+    ///
+    /// let file = FileSink::open("/var/log/app.log", 10 * 1024 * 1024, 3).unwrap();
+    /// let logger = LoggerBuilder::new()
+    ///     .to_stdout()                 // everything on the console
+    ///     .add_sink(file, Level::Warn) // warnings and errors only, to disk
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    #[must_use]
+    pub fn add_sink(mut self, sink: impl Sink + 'static, min_level: Level) -> LoggerBuilder {
+        self.sinks
+            .push((SinkSource::Custom(Box::new(sink)), min_level));
+        self
+    }
+
+    /// Replace every configured sink with a single one at the most verbose
+    /// level. Used by the `to_*` convenience methods.
+    fn set_single_sink(&mut self, source: SinkSource) {
+        self.sinks.clear();
+        self.sinks.push((source, Level::Trace));
     }
 
     /// Write to the local syslog daemon over the standard Unix datagram
@@ -414,7 +459,10 @@ impl LoggerBuilder {
     /// automatically on every message.
     #[must_use]
     pub fn to_syslog(mut self, facility: Facility) -> LoggerBuilder {
-        self.sink = SinkSource::Syslog(SyslogSink::local(facility, default_ident()));
+        self.set_single_sink(SinkSource::Syslog(SyslogSink::local(
+            facility,
+            default_ident(),
+        )));
         self
     }
 
@@ -441,8 +489,11 @@ impl LoggerBuilder {
                 "hostname resolved to no addresses",
             )
         })?;
-        self.sink =
-            SinkSource::RemoteSyslog(RemoteSyslogSink::new(addr, facility, default_ident())?);
+        self.set_single_sink(SinkSource::RemoteSyslog(RemoteSyslogSink::new(
+            addr,
+            facility,
+            default_ident(),
+        )?));
         Ok(self)
     }
 
@@ -453,23 +504,32 @@ impl LoggerBuilder {
     /// Returns an [`std::io::Error`] if the sink cannot be opened or the
     /// writer thread cannot be spawned.
     pub fn build(self) -> std::io::Result<Logger> {
-        let sink: Box<dyn Sink> = match self.sink {
-            SinkSource::Stdout => Box::new(StdoutSink),
-            SinkSource::Stderr => Box::new(StderrSink),
-            SinkSource::File(path, max_size, max_backups) => {
-                Box::new(FileSink::open(path, max_size, max_backups)?)
-            }
-            SinkSource::Syslog(sink) => Box::new(sink),
-            SinkSource::RemoteSyslog(sink) => Box::new(sink),
-            SinkSource::Custom(sink) => sink,
-        };
+        let mut slots: Vec<SinkSlot> = Vec::new();
+        // A builder with no explicit sink defaults to standard output, matching
+        // the historical default.
+        if self.sinks.is_empty() {
+            slots.push(SinkSlot::new(Box::new(StdoutSink), Level::Trace));
+        }
+        for (source, min_level) in self.sinks {
+            let sink: Box<dyn Sink> = match source {
+                SinkSource::Stdout => Box::new(StdoutSink),
+                SinkSource::Stderr => Box::new(StderrSink),
+                SinkSource::File(path, max_size, max_backups) => {
+                    Box::new(FileSink::open(path, max_size, max_backups)?)
+                }
+                SinkSource::Syslog(sink) => Box::new(sink),
+                SinkSource::RemoteSyslog(sink) => Box::new(sink),
+                SinkSource::Custom(sink) => sink,
+            };
+            slots.push(SinkSlot::new(sink, min_level));
+        }
 
         let (tx, rx) = mpsc::sync_channel(self.capacity);
         let include_location = self.include_location;
         let json = self.json;
         let handle = std::thread::Builder::new()
             .name("xoslog-writer".to_string())
-            .spawn(move || writer_loop(rx, sink, include_location, json))?;
+            .spawn(move || writer_loop(rx, slots, include_location, json))?;
 
         let filter = Arc::new(match self.filter {
             Some(filter) => filter,
@@ -493,10 +553,39 @@ impl LoggerBuilder {
     }
 }
 
-/// The writer thread: drains the queue, formats and writes records.
-fn writer_loop(rx: Receiver<Message>, mut sink: Box<dyn Sink>, include_location: bool, json: bool) {
-    let mut consecutive_errors = 0usize;
-    let mut degraded = false;
+/// A configured sink together with its per-sink level floor and failure state.
+struct SinkSlot {
+    /// The destination the writer thread feeds.
+    sink: Box<dyn Sink>,
+    /// Records below this level are not delivered to this sink.
+    min_level: Level,
+    /// Consecutive write failures; reset to zero on the next success.
+    consecutive_errors: usize,
+    /// Set once the sink has failed too many times in a row; the writer then
+    /// diverts this sink's records to standard error.
+    degraded: bool,
+}
+
+impl SinkSlot {
+    /// Wrap a sink with a level floor and fresh failure state.
+    fn new(sink: Box<dyn Sink>, min_level: Level) -> SinkSlot {
+        SinkSlot {
+            sink,
+            min_level,
+            consecutive_errors: 0,
+            degraded: false,
+        }
+    }
+}
+
+/// The writer thread: drains the queue, formats each record once and fans it
+/// out to every configured sink.
+fn writer_loop(
+    rx: Receiver<Message>,
+    mut slots: Vec<SinkSlot>,
+    include_location: bool,
+    json: bool,
+) {
     let mut running = true;
 
     while running {
@@ -505,47 +594,16 @@ fn writer_loop(rx: Receiver<Message>, mut sink: Box<dyn Sink>, include_location:
             Err(_) => break,
         };
 
-        let stop = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match msg {
-            Message::Log(entry) => {
-                let mut buf = Vec::with_capacity(96 + entry.message.len());
-                if json {
-                    crate::json::write_record(&entry, include_location, &mut buf);
-                } else {
-                    format_record(&entry, include_location, &mut buf);
-                }
-                if degraded {
-                    let mut err = std::io::stderr().lock();
-                    let _ = err.write_all(&buf);
-                    let _ = err.flush();
-                    return false;
-                }
-                if sink.write_entry(&entry, &buf).is_ok() {
-                    consecutive_errors = 0;
-                } else {
-                    consecutive_errors += 1;
-                    if consecutive_errors >= MAX_CONSECUTIVE_WRITE_ERRORS {
-                        degraded = true;
-                        let mut err = std::io::stderr().lock();
-                        let _ = err
-                            .write_all(b"[xoslog] primary sink failed, falling back to stderr\n");
-                    }
-                }
-                false
-            }
-            Message::Flush(ack) => {
-                let _ = sink.flush();
-                let _ = ack.send(());
-                false
-            }
-            Message::Shutdown(ack) => {
-                let _ = sink.flush();
-                let _ = ack.send(());
-                true
-            }
+        let stop = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_message(msg, &mut slots, include_location, json)
         })) {
             Ok(stop) => stop,
             Err(_) => {
-                degraded = true;
+                // A panic escaped message handling (e.g. while formatting).
+                // Degrade every sink so later records still reach stderr.
+                for slot in &mut slots {
+                    slot.degraded = true;
+                }
                 false
             }
         };
@@ -553,7 +611,75 @@ fn writer_loop(rx: Receiver<Message>, mut sink: Box<dyn Sink>, include_location:
         running = !stop;
     }
 
-    let _ = sink.flush();
+    for slot in &mut slots {
+        let _ = slot.sink.flush();
+    }
+}
+
+/// Handle one message, writing a record to every eligible sink.
+///
+/// Returns `true` when the writer should stop.
+fn handle_message(
+    msg: Message,
+    slots: &mut [SinkSlot],
+    include_location: bool,
+    json: bool,
+) -> bool {
+    match msg {
+        Message::Log(entry) => {
+            let mut buf = Vec::with_capacity(96 + entry.message.len());
+            if json {
+                crate::json::write_record(&entry, include_location, &mut buf);
+            } else {
+                format_record(&entry, include_location, &mut buf);
+            }
+
+            for slot in slots.iter_mut() {
+                if entry.level < slot.min_level {
+                    continue;
+                }
+                if slot.degraded {
+                    write_stderr(&buf);
+                    continue;
+                }
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    slot.sink.write_entry(&entry, &buf)
+                }));
+                match outcome {
+                    Ok(Ok(())) => slot.consecutive_errors = 0,
+                    _ => {
+                        slot.consecutive_errors += 1;
+                        if slot.consecutive_errors >= MAX_CONSECUTIVE_WRITE_ERRORS {
+                            slot.degraded = true;
+                            write_stderr(b"[xoslog] a sink failed, falling back to stderr\n");
+                        }
+                    }
+                }
+            }
+            false
+        }
+        Message::Flush(ack) => {
+            for slot in slots.iter_mut() {
+                let _ = slot.sink.flush();
+            }
+            let _ = ack.send(());
+            false
+        }
+        Message::Shutdown(ack) => {
+            for slot in slots.iter_mut() {
+                let _ = slot.sink.flush();
+            }
+            let _ = ack.send(());
+            true
+        }
+    }
+}
+
+/// Write raw bytes to standard error, ignoring errors.
+fn write_stderr(bytes: &[u8]) {
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(bytes);
+    let _ = err.flush();
 }
 
 /// Format a record into `out`, appending a trailing newline.

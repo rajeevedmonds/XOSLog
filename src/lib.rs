@@ -155,6 +155,31 @@
 //! [`Logger::log`] (using the entry's target), and is checked programmatically
 //! with [`Logger::is_enabled_for`]. See [`TargetFilter`] for the directive
 //! grammar and [`LoggerBuilder`] for the builder methods.
+//!
+//! # Multiple sinks
+//!
+//! A logger can write to several destinations at once. The `to_*` methods set
+//! a single primary sink; [`LoggerBuilder::add_sink`] appends another sink with
+//! its own minimum level:
+//!
+//! ```no_run
+//! use xoslog::{FileSink, Level, LoggerBuilder};
+//!
+//! let file = FileSink::open("/var/log/app.log", 10 * 1024 * 1024, 3).unwrap();
+//! let logger = LoggerBuilder::new()
+//!     .to_stdout()                 // everything on the console
+//!     .add_sink(file, Level::Warn) // warnings and errors only, to disk
+//!     .build()
+//!     .unwrap();
+//!
+//! logger.info("console only");
+//! logger.error("console and file");
+//! logger.flush();
+//! ```
+//!
+//! Sinks are independent: if one fails repeatedly the writer diverts only that
+//! sink's records to standard error, leaving the others untouched, and
+//! [`Logger::flush`] drains every sink.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
