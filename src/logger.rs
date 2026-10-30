@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use crate::entry::LogEntry;
 use crate::filter::TargetFilter;
 use crate::level::Level;
-use crate::sink::{FileSink, Sink, StderrSink, StdoutSink};
+use crate::sink::{FileSink, RotationInterval, Sink, StderrSink, StdoutSink};
 use crate::syslog::{default_ident, Facility, RemoteSyslogSink, SyslogSink};
 use crate::time::Timestamp;
 
@@ -40,8 +40,9 @@ enum SinkSource {
     Stdout,
     /// Standard error.
     Stderr,
-    /// A size-rotating file at `path`, with `max_size` and `max_backups`.
-    File(PathBuf, u64, usize),
+    /// A rotating file at `path`, with `max_size`, `max_backups` and an
+    /// optional time-based [`RotationInterval`].
+    File(PathBuf, u64, usize, RotationInterval),
     /// The local syslog daemon.
     Syslog(SyslogSink),
     /// A remote syslog server over UDP.
@@ -380,24 +381,47 @@ impl LoggerBuilder {
 
     /// Write to a size-rotating file.
     ///
-    /// `max_size` is the rotation threshold in bytes (`0` disables rotation);
-    /// `max_backups` is how many numbered backups are kept (`0` truncates in
-    /// place).
+    /// `max_size` is the rotation threshold in bytes (`0` disables size
+    /// rotation); `max_backups` is how many numbered backups are kept (`0`
+    /// truncates in place). Time-based rotation is off; use
+    /// [`LoggerBuilder::to_file_with_interval`] to also rotate on a schedule.
     ///
     /// # Errors
     ///
     /// Returns an [`std::io::Error`] if the log file cannot be opened.
     pub fn to_file(
-        mut self,
+        self,
         path: impl AsRef<std::path::Path>,
         max_size: u64,
         max_backups: usize,
     ) -> std::io::Result<LoggerBuilder> {
-        FileSink::open(&path, max_size, max_backups)?;
+        self.to_file_with_interval(path, max_size, max_backups, RotationInterval::Never)
+    }
+
+    /// Write to a file that rotates on size and/or on a wall-clock interval.
+    ///
+    /// `max_size` is the size threshold in bytes (`0` disables size rotation).
+    /// `interval` is the schedule ([`RotationInterval::Never`] for size-only,
+    /// matching [`LoggerBuilder::to_file`]). Either trigger is enough to
+    /// rotate. `max_backups` is how many numbered backups are kept (`0`
+    /// truncates in place).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`] if the log file cannot be opened.
+    pub fn to_file_with_interval(
+        mut self,
+        path: impl AsRef<std::path::Path>,
+        max_size: u64,
+        max_backups: usize,
+        interval: RotationInterval,
+    ) -> std::io::Result<LoggerBuilder> {
+        FileSink::open_with_interval(&path, max_size, max_backups, interval)?;
         self.set_single_sink(SinkSource::File(
             path.as_ref().to_path_buf(),
             max_size,
             max_backups,
+            interval,
         ));
         Ok(self)
     }
@@ -514,9 +538,9 @@ impl LoggerBuilder {
             let sink: Box<dyn Sink> = match source {
                 SinkSource::Stdout => Box::new(StdoutSink),
                 SinkSource::Stderr => Box::new(StderrSink),
-                SinkSource::File(path, max_size, max_backups) => {
-                    Box::new(FileSink::open(path, max_size, max_backups)?)
-                }
+                SinkSource::File(path, max_size, max_backups, interval) => Box::new(
+                    FileSink::open_with_interval(path, max_size, max_backups, interval)?,
+                ),
                 SinkSource::Syslog(sink) => Box::new(sink),
                 SinkSource::RemoteSyslog(sink) => Box::new(sink),
                 SinkSource::Custom(sink) => sink,

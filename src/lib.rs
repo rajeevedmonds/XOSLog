@@ -9,7 +9,8 @@
 //! Logging is asynchronous: callers push formatted records onto a bounded,
 //! thread-safe queue and a dedicated writer thread drains the queue, formats
 //! records and writes them to the configured sink (standard output, standard
-//! error, a size-rotating file, or the syslog daemon). This keeps logging
+//! error, a size- and optionally time-rotating file, or the syslog daemon).
+//! This keeps logging
 //! calls cheap and lock-free for callers while a single serialized writer
 //! guarantees that records from any number of threads are never interleaved.
 //!
@@ -57,6 +58,20 @@
 //!
 //! logger.info("hello from xoslog");
 //! logger.flush();
+//! ```
+//!
+//! Rotate on a wall-clock interval as well (or instead) with
+//! [`LoggerBuilder::to_file_with_interval`] and [`RotationInterval`]:
+//!
+//! ```no_run
+//! use xoslog::{Level, LoggerBuilder, RotationInterval};
+//!
+//! let logger = LoggerBuilder::new()
+//!     .level(Level::Info)
+//!     .to_file_with_interval("/var/log/app.log", 0, 7, RotationInterval::Daily)
+//!     .unwrap()
+//!     .build()
+//!     .unwrap();
 //! ```
 //!
 //! # Syslog
@@ -203,6 +218,6 @@ pub use logger::{
     global, init_default, set_global, Backpressure, Logger, LoggerBuilder,
     DEFAULT_CHANNEL_CAPACITY, DEFAULT_MAX_FILE_SIZE,
 };
-pub use sink::{FileSink, Sink};
+pub use sink::{FileSink, RotationInterval, Sink};
 pub use syslog::{Facility, RemoteSyslogSink, SyslogSink, DEFAULT_SYSLOG_SOCKETS};
 pub use time::Timestamp;

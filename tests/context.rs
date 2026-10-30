@@ -59,7 +59,11 @@ fn json_records_carry_context_within_scope_only() {
         "context must not leak outside scope: {}",
         lines[0]
     );
-    assert!(lines[1].contains("\"request_id\":\"abc-123\""), "{}", lines[1]);
+    assert!(
+        lines[1].contains("\"request_id\":\"abc-123\""),
+        "{}",
+        lines[1]
+    );
     assert!(lines[1].contains("\"user_id\":\"u42\""), "{}", lines[1]);
     assert!(lines[2].contains("\"msg\":\"after scope\""));
     assert!(
@@ -136,7 +140,10 @@ fn nested_scopes_innermost_wins() {
         .build()
         .unwrap();
 
-    let outer = push_context([Field::str("request_id", "outer"), Field::str("user", "alice")]);
+    let outer = push_context([
+        Field::str("request_id", "outer"),
+        Field::str("user", "alice"),
+    ]);
     {
         let inner = push_context([Field::str("request_id", "inner")]);
         logger.info("in inner");

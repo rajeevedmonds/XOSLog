@@ -19,7 +19,9 @@ enforced at compile time).
   - If the writer thread dies, callers log synchronously to stderr as a last
     resort rather than silently dropping records.
   - `flush()` and `shutdown()` give deterministic draining and teardown.
-- **Size-based file rotation** with a bounded number of backups.
+- **Size-based and time-based file rotation** with a bounded number of
+  backups. Rotate when the file exceeds a size threshold, on a wall-clock
+  interval (hourly, daily, weekly, or a custom duration), or either.
 - **Syslog support** (RFC 3164) over the standard `/dev/log` Unix datagram
   socket, with facility selection, automatic reconnection and correct
   per-record severities.
@@ -76,6 +78,33 @@ logger.shutdown();
 When `/var/log/app.log` exceeds the size threshold it is renamed to
 `app.log.1`, older backups shift up, and the oldest (`app.log.4` here) is
 dropped.
+
+To also rotate on a schedule, use `to_file_with_interval`. Size and time
+triggers are independent: either one is enough to rotate. Intervals are
+aligned to the Unix epoch in UTC (hourly at `:00`, daily at midnight, weekly
+at Monday 00:00):
+
+```rust,no_run
+use std::time::Duration;
+use xoslog::{Level, LoggerBuilder, RotationInterval};
+
+let logger = LoggerBuilder::new()
+    .level(Level::Info)
+    .to_file_with_interval(
+        "/var/log/app.log",
+        10 * 1024 * 1024,
+        7,
+        RotationInterval::Daily,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+```
+
+`RotationInterval::Hourly`, `Daily`, `Weekly`, `Every(Duration)` and `Never`
+(size-only, the default) are available. `FileSink::open_with_interval` and
+`FileSink::rotate_every` expose the same options when you construct the sink
+yourself. Pass `0` for `max_size` to rotate on time alone.
 
 ## Concurrency
 

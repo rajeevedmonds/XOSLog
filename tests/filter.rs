@@ -9,7 +9,10 @@ fn temp_file(tag: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("xoslog-filter-{tag}-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "xoslog-filter-{tag}-{}-{nanos}",
+        std::process::id()
+    ))
 }
 
 /// Tests that read the process-wide `XOSLOG` variable or install the global
@@ -40,7 +43,11 @@ fn per_target_levels_apply_at_log_time() {
     logger.log(record("myapp::server", Level::Debug, "descendant debug ok"));
     logger.log(record("hyper", Level::Info, "hyper info filtered"));
     logger.log(record("hyper", Level::Warn, "hyper warn ok"));
-    logger.log(record("unrelated", Level::Debug, "unrelated debug filtered"));
+    logger.log(record(
+        "unrelated",
+        Level::Debug,
+        "unrelated debug filtered",
+    ));
     logger.log(record("unrelated", Level::Info, "unrelated info ok"));
     logger.flush();
 
@@ -68,7 +75,11 @@ fn longest_match_and_module_boundary() {
     logger.log(record("lib::net", Level::Debug, "lib::net debug ok"));
     logger.log(record("lib::net::tls", Level::Debug, "deep debug ok"));
     logger.log(record("lib::net", Level::Info, "lib::net info ok"));
-    logger.log(record("lib::netx", Level::Debug, "sibling must NOT get debug"));
+    logger.log(record(
+        "lib::netx",
+        Level::Debug,
+        "sibling must NOT get debug",
+    ));
     logger.log(record("lib::netx", Level::Info, "sibling info ok"));
     logger.flush();
 
@@ -184,7 +195,10 @@ fn is_enabled_for_reflects_filter() {
     // The default (unmatched) behaviour is unchanged.
     assert!(logger.is_enabled(Level::Info));
     assert!(!logger.is_enabled(Level::Debug));
-    assert_eq!(logger.filter().effective_level("myapp", Level::Info), Level::Debug);
+    assert_eq!(
+        logger.filter().effective_level("myapp", Level::Info),
+        Level::Debug
+    );
     logger.shutdown();
 }
 

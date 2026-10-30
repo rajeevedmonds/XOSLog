@@ -191,19 +191,25 @@ mod tests {
 
     #[test]
     fn nested_scopes_merge_innermost_wins() {
-        let outer = push_context([Field::str("request_id", "outer"), Field::str("user", "alice")]);
+        let outer = push_context([
+            Field::str("request_id", "outer"),
+            Field::str("user", "alice"),
+        ]);
         {
             let inner = push_context([Field::str("request_id", "inner")]);
             let ctx = current_context();
             assert_eq!(ctx.len(), 2);
-            assert!(ctx.iter().any(|f| f.key == "request_id" && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "inner")));
-            assert!(ctx.iter().any(|f| f.key == "user" && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "alice")));
+            assert!(ctx.iter().any(|f| f.key == "request_id"
+                && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "inner")));
+            assert!(ctx.iter().any(|f| f.key == "user"
+                && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "alice")));
             drop(inner);
         }
         // Outer frame restored after the inner guard is dropped.
         let ctx = current_context();
         assert_eq!(ctx.len(), 2);
-        assert!(ctx.iter().any(|f| f.key == "request_id" && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "outer")));
+        assert!(ctx.iter().any(|f| f.key == "request_id"
+            && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "outer")));
         drop(outer);
         assert!(current_context().is_empty());
     }
@@ -238,11 +244,13 @@ mod tests {
         drop(inner);
         let _guard = push_context([Field::str("request_id", "zzz")]);
         let mut ctx = current_context();
-        assert!(ctx.iter().any(|f| f.key == "request_id" && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "zzz")));
+        assert!(ctx.iter().any(|f| f.key == "request_id"
+            && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "zzz")));
         // Re-applying the old snapshot on a fresh (empty) stack works too.
         let reentered = snapshot.enter();
         ctx = current_context();
-        assert!(ctx.iter().any(|f| f.key == "request_id" && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "abc")));
+        assert!(ctx.iter().any(|f| f.key == "request_id"
+            && matches!(&f.value, crate::entry::FieldValue::Str(v) if v == "abc")));
         assert!(ctx.iter().any(|f| f.key == "request_id"));
         drop(reentered);
     }

@@ -89,3 +89,62 @@ fn no_rotation_when_max_size_is_zero() {
         "no rotation expected"
     );
 }
+
+#[test]
+fn time_rotation_every_second_creates_a_backup() {
+    use std::thread;
+    use std::time::Duration;
+    use xoslog::RotationInterval;
+
+    let path = temp_file("interval");
+    let logger = LoggerBuilder::new()
+        .include_location(false)
+        .to_file_with_interval(&path, 0, 2, RotationInterval::Every(Duration::from_secs(1)))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    logger.info("before interval");
+    logger.flush();
+    assert!(
+        !exists(Path::new(&format!("{}.1", path.display()))),
+        "must not rotate before the interval elapses"
+    );
+
+    thread::sleep(Duration::from_millis(1_100));
+    logger.info("after interval");
+    logger.flush();
+
+    assert!(
+        exists(Path::new(&format!("{}.1", path.display()))),
+        "expected a backup after the interval elapsed"
+    );
+    let active = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        active.contains("after interval"),
+        "active file should hold the post-rotation record, got: {active:?}"
+    );
+}
+
+#[test]
+fn daily_interval_does_not_rotate_immediately() {
+    use xoslog::RotationInterval;
+
+    let path = temp_file("daily");
+    let logger = LoggerBuilder::new()
+        .include_location(false)
+        .to_file_with_interval(&path, 0, 3, RotationInterval::Daily)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    for i in 0..10 {
+        logger.info(format!("same-day message {i}"));
+    }
+    logger.flush();
+
+    assert!(
+        !exists(Path::new(&format!("{}.1", path.display()))),
+        "daily rotation must not fire within the same UTC day"
+    );
+}
